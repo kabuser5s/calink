@@ -10,32 +10,46 @@ const views = path.join(__dirname, 'views');
 const ALLOWED_COUNTRIES = ['FR', 'CI'];
 
 function getClientIp(req) {
-    // Cloudflare expose l'IP réelle ici, même si l'IP proxy est masquée
     if (req.headers['cf-connecting-ip']) return req.headers['cf-connecting-ip'];
+    if (req.headers['x-real-ip']) return req.headers['x-real-ip'];
     const forwarded = req.headers['x-forwarded-for'];
     if (forwarded) return forwarded.split(',')[0].trim();
     return req.socket.remoteAddress;
 }
 
+function isPrivateIp(ip) {
+    if (!ip) return true;
+    const clean = ip.replace(/^::ffff:/, '');
+    return (
+        clean === '::1' ||
+        clean.startsWith('127.') ||
+        clean.startsWith('192.168.') ||
+        clean.startsWith('10.') ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(clean)
+    );
+}
+
 function checkCountry(ip) {
     return new Promise((resolve) => {
-        // Fallback permissif pour les IPs locales/privées
-        if (!ip || ip === '::1' || ip.startsWith('127.') || ip.startsWith('192.168.') || ip.startsWith('10.')) {
-            return resolve(true);
-        }
-        const url = `https://ip-api.com/json/${ip}?fields=countryCode`;
-        https.get(url, (res) => {
+        if (isPrivateIp(ip)) return resolve(true);
+        const clean = ip.replace(/^::ffff:/, '');
+        const url = `https://ip-api.com/json/${clean}?fields=status,countryCode`;
+        const req = https.get(url, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
                 try {
                     const json = JSON.parse(data);
+                    // Si l'API échoue ou rate-limite, on laisse passer (fail open)
+                    if (json.status !== 'success') return resolve(true);
                     resolve(ALLOWED_COUNTRIES.includes(json.countryCode));
                 } catch {
-                    resolve(false);
+                    resolve(true);
                 }
             });
-        }).on('error', () => resolve(false));
+        });
+        req.on('error', () => resolve(true));
+        req.setTimeout(3000, () => { req.destroy(); resolve(true); });
     });
 }
 
